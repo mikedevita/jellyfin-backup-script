@@ -48,6 +48,106 @@ function Select-FolderDialog {
     return $null
 }
 
+function Get-7zipPath {
+    $7zipDir = Join-Path $PSScriptRoot "7zip"
+    $7zaPath = Join-Path $7zipDir "7za.exe"
+    $7zPath = Join-Path $7zipDir "7z.exe"
+    
+    # Check if 7zip already exists
+    if (Test-Path $7zaPath) {
+        return $7zaPath
+    }
+    if (Test-Path $7zPath) {
+        return $7zPath
+    }
+    
+    # 7zip not found, need to download it
+    Write-Host "7zip not found. Downloading 7zip portable..."
+    
+    try {
+        # Create 7zip directory
+        if (-not (Test-Path $7zipDir)) {
+            New-Item -ItemType Directory -Path $7zipDir | Out-Null
+        }
+        
+        # Download 7zip extra package (contains 7za.exe)
+        $7zipUrl = "https://www.7-zip.org/a/7z2301-extra.7z"
+        $7zipArchive = Join-Path $env:TEMP "7z2301-extra.7z"
+        
+        Write-Host "Downloading from $7zipUrl..."
+        Invoke-WebRequest -Uri $7zipUrl -OutFile $7zipArchive -UseBasicParsing
+        
+        # Extract 7zip archive
+        # We'll try multiple extraction methods since we don't have 7zip yet
+        $tempExtractDir = Join-Path $env:TEMP "7zip-extract"
+        if (Test-Path $tempExtractDir) {
+            Remove-Item -Path $tempExtractDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $tempExtractDir | Out-Null
+        
+        $extracted = $false
+        
+        # Method 1: Try Windows built-in tar (Windows 10 1903+)
+        try {
+            $tarOutput = & tar -xf $7zipArchive -C $tempExtractDir 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $extracted = $true
+                Write-Host "Extracted using Windows tar."
+            }
+        } catch {
+            # tar not available or failed
+        }
+        
+        # Method 2: Try PowerShell Expand-Archive (might work for some 7z files)
+        if (-not $extracted) {
+            try {
+                Expand-Archive -Path $7zipArchive -DestinationPath $tempExtractDir -Force -ErrorAction Stop
+                $extracted = $true
+                Write-Host "Extracted using PowerShell Expand-Archive."
+            } catch {
+                # Expand-Archive doesn't support 7z format
+            }
+        }
+        
+        if (-not $extracted) {
+            throw "Could not extract 7zip archive automatically. Windows tar or PowerShell Expand-Archive failed."
+        }
+        
+        # Find and copy 7za.exe or 7z.exe to our 7zip directory
+        $7zaSource = Get-ChildItem -Path $tempExtractDir -Recurse -Filter "7za.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $7zaSource) {
+            $7zaSource = Get-ChildItem -Path $tempExtractDir -Recurse -Filter "7z.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        
+        if ($7zaSource) {
+            Copy-Item -Path $7zaSource.FullName -Destination $7zipDir -Force
+            Write-Host "7zip downloaded and extracted successfully."
+        } else {
+            throw "7za.exe or 7z.exe not found in downloaded archive"
+        }
+        
+        # Cleanup
+        Remove-Item -Path $7zipArchive -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $tempExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+        
+        # Verify the file exists now
+        if (Test-Path $7zaPath) {
+            return $7zaPath
+        }
+        if (Test-Path $7zPath) {
+            return $7zPath
+        }
+        
+        throw "7zip executable not found after extraction"
+        
+    } catch {
+        Write-Host "Failed to download 7zip: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Please manually download 7zip portable from https://www.7-zip.org/" -ForegroundColor Yellow
+        Write-Host "Extract 7za.exe to: $7zipDir" -ForegroundColor Yellow
+        throw "7zip is required but could not be downloaded automatically"
+    }
+}
+
 function Stop-Jellyfin {
     Write-Host "Attempting to stop Jellyfin..."
     
@@ -112,8 +212,32 @@ function Create-Backup {
 
     try {
         Write-Host "Creating backup: $backupFile"
-        Compress-Archive -Path "$JellyfinDataPath\*" -DestinationPath $backupFile -Force
-        Write-Host "Backup created successfully!"
+        
+        # Get 7zip path (downloads if needed)
+        $7zipExe = Get-7zipPath
+        
+        # Use 7zip to create ZIP archive
+        # -tzip: use ZIP format
+        # -mx5: compression level 5 (balanced)
+        # -mm=Deflate: use deflate method for ZIP
+        # -y: assume yes on all queries
+        $arguments = @(
+            "a",
+            "-tzip",
+            "-mx5",
+            "-mm=Deflate",
+            "-y",
+            "`"$backupFile`"",
+            "`"$JellyfinDataPath\*`""
+        )
+        
+        $process = Start-Process -FilePath $7zipExe -ArgumentList $arguments -Wait -NoNewWindow -PassThru
+        
+        if ($process.ExitCode -eq 0) {
+            Write-Host "Backup created successfully!"
+        } else {
+            throw "7zip exited with code $($process.ExitCode)"
+        }
     } catch {
         Write-Host "Backup failed: $($_.Exception.Message)"
     }
@@ -134,8 +258,28 @@ function Restore-Backup {
 
         try {
             Remove-Item -Path "$JellyfinDataPath\*" -Recurse -Force
-            Expand-Archive -Path $zipPath -DestinationPath $JellyfinDataPath -Force
-            Write-Host "Restore completed successfully."
+            
+            # Get 7zip path (downloads if needed)
+            $7zipExe = Get-7zipPath
+            
+            # Use 7zip to extract ZIP archive
+            # x: extract with full paths
+            # -o: output directory (no space after -o)
+            # -y: assume yes on all queries
+            $arguments = @(
+                "x",
+                "`"$zipPath`"",
+                "-o`"$JellyfinDataPath`"",
+                "-y"
+            )
+            
+            $process = Start-Process -FilePath $7zipExe -ArgumentList $arguments -Wait -NoNewWindow -PassThru
+            
+            if ($process.ExitCode -eq 0) {
+                Write-Host "Restore completed successfully."
+            } else {
+                throw "7zip exited with code $($process.ExitCode)"
+            }
         } catch {
             Write-Host "Restore failed: $($_.Exception.Message)"
         }
