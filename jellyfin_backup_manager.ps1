@@ -180,7 +180,20 @@ function Start-Jellyfin {
             Start-Process -FilePath $jellyfinPath
             Write-Host "Jellyfin process started."
         } else {
-            Write-Host "Jellyfin executable not found. Please start it manually."
+            # If not found in LOCALAPPDATA, check system path for jellyfin-windows-tray
+            $systemTrayPath = "C:\Program Files\Jellyfin\Server\jellyfin-windows-tray\Jellyfin.Windows.Tray.exe"
+            if (Test-Path $systemTrayPath) {
+                Start-Process -FilePath $systemTrayPath
+                Write-Host "Jellyfin Windows Tray started from system path."
+            } else {
+                $systemAppPath = "C:\Program Files\Jellyfin\Server\jellyfin.exe"
+                if (Test-Path $systemAppPath) {
+                    Start-Process -FilePath $systemAppPath
+                    Write-Host "Jellyfin process started from system path."
+                } else {
+                    Write-Host "Jellyfin executable not found. Please start it manually."
+                }
+            }
         }
     }
 }
